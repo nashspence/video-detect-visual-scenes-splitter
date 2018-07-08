@@ -1,0 +1,14 @@
+{
+  "name": "script",
+  "version": "1.0.0",
+  "description": "",
+  "keywords": [],
+  "author": "Nash Spence",
+  "license": "UNLICENSED",
+  "scripts": {
+    "run": "ts-node src/script.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^10.5.2"
+  }
+}
