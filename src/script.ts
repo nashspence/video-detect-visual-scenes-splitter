@@ -1,58 +1,110 @@
 #!/usr/bin/env ts-node
 import { execSync } from "child_process";
 import { dirname, join, basename, extname } from "path";
-import { existsSync, writeJsonSync, readJsonSync } from "fs-extra";
+import { existsSync, writeJsonSync, readJsonSync, removeSync, statSync } from "fs-extra";
+import { mkdirSync } from "fs";
 // tslint:disable:max-line-length no-console
 
-const inputFileName = `${__dirname}/${process.argv[2]}`;
-const threshold = process.argv[3] ? process.argv[3] : "0.25";
-const minimumSceneTime = process.argv[4] ? process.argv[4] : 2;
+const execOptions = { maxBuffer: 1073741824 };
+const framesToTrimFromEachClipEnd = 2;
 
-const dir = dirname(inputFileName);
+const inputFileName = process.argv[2];
+const outputDirectory = process.argv[3] ? process.argv[3] : dirname(inputFileName);
+const threshold = process.argv[4] ? process.argv[4] : "0.07";
+const minimumDesiredClipLength = process.argv[5] ? process.argv[5] : 0.5;
+const removeAudio = (process.argv[6] ? process.argv[6] : false) as boolean;
+
+const inputFileStat = statSync(inputFileName);
+
 const ext = extname(inputFileName);
 const base = basename(inputFileName, ext);
+const containerDirectory = join(outputDirectory, `${base}.${inputFileStat.mtime.getTime() + (inputFileStat.mtime.getTimezoneOffset() * 60 * 1000) }`);
+const resumeDataPath = join(containerDirectory, "resume.json");
 
 let scenes: IScene[];
-if (existsSync("scenes.json")) {
-    scenes = readJsonSync("scenes.json");
+if (existsSync(resumeDataPath)) {
+    console.log(`Resumable job found at ${resumeDataPath}. Resuming the previously unfinished job...`);
+    scenes = readJsonSync(resumeDataPath);
 } else {
+    console.log(`Detecting probable hard cuts in ${inputFileName} using ffmpeg (threshold = ${threshold}, minimum clip length = ${minimumDesiredClipLength} seconds)...`);
+
+    if(!existsSync(containerDirectory)) {
+        mkdirSync(containerDirectory, { recursive: true });
+    }
+
     const detectScenesExec = `ffmpeg -i "${inputFileName}" -filter:v "select='gt(scene,${threshold})',showinfo" -f null - 2>&1`;
-    console.log(detectScenesExec);
-    const detectScenesResult = execSync(detectScenesExec).toString();
+    const detectTotalDurationExec = `ffprobe -v quiet -print_format json -show_format -show_streams "${inputFileName}"`;
+    const videoContainerInformation = JSON.parse(execSync(detectTotalDurationExec, execOptions).toString());
+    const videoStreamInformation = (videoContainerInformation.streams as any[]).find((x) => x.codec_type === "video");
+    const videoFormatInformation = videoContainerInformation.format;
+    const videoTotalDuration = videoFormatInformation.duration;
+    const videoAverageFrameLength = +eval(videoStreamInformation.avg_frame_rate) / 60;
+
+    const detectScenesResult = execSync(detectScenesExec, execOptions).toString();
     const matches = detectScenesResult.match(/pts_time:[0-9.]*/gm);
     const sceneTimes = matches ? matches.map((match) => match.slice(9)) : [];
 
-    scenes = sceneTimes.map((sceneTime, index) => ({ 
-        start: sceneTimes[index - 1] ? sceneTimes[index - 1] : "0.000000", 
-        end: sceneTime,
-        target: join(dir, `${base} - Scene ${index + 1}${ext}`),
-    }));
+    scenes = [];
+    for (let index = 0; index < sceneTimes.length; index++) {
+        const start = sceneTimes[index - 1] !== undefined ? sceneTimes[index - 1] : "0.000000";
+        const end = `${+sceneTimes[index] - (framesToTrimFromEachClipEnd * videoAverageFrameLength)}`;
 
-    writeJsonSync("scenes.json", scenes);
-}
+        if (+end - +start >= minimumDesiredClipLength) {
+            scenes.push({
+                start,
+                end,
+                target: join(containerDirectory, `${base} - Clip ${scenes.length + 1}.mp4`),
+            });
 
-console.log(JSON.stringify(scenes));
-scenes.forEach((scene, index) => {
-    if (!existsSync(scene.target)) {
-        if ((+scene.end - +scene.start) >= minimumSceneTime) {
-            try{
-                const splitSceneExec = `(${index + 1} of ${scenes.length}) ffmpeg -i "${inputFileName}" -ss ${scene.start} -strict -2 -to ${scene.end} "${scene.target}" 2>&1`;
-                console.log(splitSceneExec);
-                execSync(splitSceneExec).toString();
-            } catch(e) {
-                const error: Error = e;
-                console.log(`${error.message}. Skipping to next scene...`);
+            if (index === sceneTimes.length - 1) {
+                if (+videoTotalDuration - +end >= minimumDesiredClipLength) {
+                    scenes.push({
+                        start: end,
+                        end: videoTotalDuration,
+                        target: join(containerDirectory, `${base} - Clip ${scenes.length + 1}.mp4`),
+                    });
+                } else {
+                    if(scenes[scenes.length - 1]) {
+                        scenes[scenes.length - 1].end = videoTotalDuration;
+                    }
+                }
             }
         } else {
-            console.log(`(${index + 1} of ${scenes.length}) ${scene.target} is less than the minimum scene time. Skipping to next scene...`);
+            if(scenes[scenes.length - 1]) {
+                scenes[scenes.length - 1].end = end;
+            }
         }
-    } else {
-        console.log(`(${index + 1} of ${scenes.length}) ${scene.target} already encoded. Skipping to next scene...`);
+    }
+
+    console.log(`Creating ${resumeDataPath} with detected probable hard cut data...`);
+    writeJsonSync(resumeDataPath, scenes);
+}
+
+console.log(`Beginning split and re-encode clips to ${containerDirectory}. If you need to pause or something goes wrong before the job completes, you can resume the job by re-running this script again with the same input.`);
+scenes.forEach((scene, index) => {
+    if (!existsSync(scene.target)) {
+        try {
+            const startDate = new Date(0);
+            const endDate = new Date(0);
+            startDate.setSeconds(+scene.start);
+            endDate.setSeconds(+scene.end);
+            const splitSceneExec = `ffmpeg -i "${inputFileName}" -ss ${scene.start} -to ${scene.end} -c:v libx264 -crf 18${removeAudio ? " -an" : ""} -strict -2 "${scene.target}" 2>&1`;
+            console.log(`Encoding probable clip ${index} of ${scenes.length} from ${startDate.toISOString().substr(11, 8)} to ${endDate.toISOString().substr(11, 8)} as ${scene.target}...`);
+            execSync(splitSceneExec, execOptions).toString();
+        } catch (e) {
+            const error: Error = e;
+            console.log(`${error.message}. Skipping to next scene...`);
+        }
     }
 });
 
+console.log(`Encoding job completed successfully. Removing ${resumeDataPath}...`);
+removeSync(resumeDataPath);
+
+console.log(`DONE!`);
+
 export interface IScene {
     readonly start: string;
-    readonly end: string;
+    end: string;
     readonly target: string;
 }
