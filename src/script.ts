@@ -7,6 +7,8 @@ import { OptionDefinition } from "command-line-args";
 import commandLineArgs = require("command-line-args");
 // tslint:disable:max-line-length no-console
 
+const execOptions = { maxBuffer: 1073741824 };
+
 const optionDefinitions: Array<OptionDefinition> = [
     { name: "source", alias: "s", type: String, defaultOption: true },
     { name: "output_directory", alias: "o", type: String, multiple: false },
@@ -29,9 +31,6 @@ if(!options.source) {
     console.log("   --remove_frames_from_clip_ends (-f) : removes the specified number of frames from the end of each encode clip\n");
     process.exit(0);
 }
-
-const execOptions = { maxBuffer: 1073741824 };
-
 
 const inputFileName = options.source!;
 const outputDirectory = options.output_directory ? options.output_directory : dirname(inputFileName);
@@ -122,7 +121,7 @@ scenes.forEach((scene, index) => {
             startDate.setSeconds(+scene.start);
             endDate.setSeconds(+scene.end);
             const splitSceneExec = `ffmpeg -i "${inputFileName}" -ss ${scene.start} -to ${scene.end} -c:v libx264 -crf 18${removeAudio ? " -an" : ""} -strict -2 "${scene.target}" 2>&1`;
-            console.log(`Encoding probable clip ${index} of ${scenes.length} from ${startDate.toISOString().substr(11, 8)} to ${endDate.toISOString().substr(11, 8)} as ${scene.target}...`);
+            console.log(`Encoding clip ${index} of ${scenes.length} from ${startDate.toISOString().substr(11, 8)} to ${endDate.toISOString().substr(11, 8)} as ${scene.target}...`);
             execSync(splitSceneExec, execOptions).toString();
         } catch (e) {
             const error: Error = e as Error;
