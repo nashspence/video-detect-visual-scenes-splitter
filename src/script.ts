@@ -51,6 +51,14 @@ let scenes: IScene[];
 if (existsSync(resumeDataPath)) {
     console.log(`Resumable job found at ${resumeDataPath}. Resuming the previously unfinished job...`);
     scenes = readJsonSync(resumeDataPath);
+    scenes.forEach((scene, index) => {
+        if (!existsSync(scene.target)) {
+            if(scenes[index - 1]) {
+                console.log(`Removing uncomplete file at ${scenes[index - 1].target}...`);
+                removeSync(scenes[index - 1].target);
+            }
+        }
+    });
 } else {
     if(!existsSync(containerDirectory)) {
         mkdirSync(containerDirectory, { recursive: true });
